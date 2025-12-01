@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Timing Master: Lightsaber Edition</title>
+<style>
+body { margin:0; overflow:hidden; background:black; font-family: Arial, sans-serif;}
+canvas { display:block; }
+#menu {
+    position: absolute; top:0; left:0; width:100%; height:100%;
+    background: rgba(0,0,0,0.9); display:flex; flex-direction: column; justify-content:center; align-items:center;
+    color:white; text-align:center;
+}
+button {
+    font-size:24px; margin:10px; padding:10px 20px; cursor:pointer; border:none; border-radius:8px;
+    background: #111; color:white; transition: 0.3s;
+}
+button:hover { background:#333; }
+</style>
+</head>
+<body>
+
+<div id="menu">
+    <h1>Timing Master: Choose Your Lightsaber Color</h1>
+    <button onclick="startGame('violet')">Light Purple</button>
+    <button onclick="startGame('red')">Red</button>
+    <button onclick="startGame('deepskyblue')">Blue</button>
+    <button onclick="startGame('lightgreen')">Green</button>
+</div>
+
+<canvas id="game"></canvas>
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+
+let gravity = 0.6;
+let keys = { left:false, right:false };
+let platforms = [];
+let particles = [];
+let stars = [];
+let shootingStars = [];
+let enemies = [];
+let score = 0;
+let playerHealth = 3;
+let gameOver = false;
+let combo = 0;
+let lightsaberColor = 'violet';
+let gameStarted = false;
+let killCount = 0;
+let chargedAttackAvailable = false;
+
+/* ---------------- BEAUTIFUL PARALLAX BACKGROUND ---------------- */
+
+let nebulaLayers = [];
+
+function initBackground(){
+    let colors = [
+        "rgba(90,0,150,0.25)",
+        "rgba(0,120,255,0.25)",
+        "rgba(0,255,200,0.2)"
+    ];
+
+    for(let i=0;i<3;i++){
+        nebulaLayers.push({
+            x: Math.random()*canvas.width,
+            y: Math.random()*canvas.height,
+            r: 300 + Math.random()*300,
+            color: colors[i],
+            speed: 0.1 + i*0.1
+        });
+    }
+}
+
+function drawBackground(){
+    // Gradient sky
+    let g = ctx.createLinearGradient(0,0,0,canvas.height);
+    g.addColorStop(0,"#020111");
+    g.addColorStop(1,"#090017");
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    // Moving nebula blobs
+    nebulaLayers.forEach(n=>{
+        ctx.beginPath();
+        ctx.arc(n.x,n.y,n.r,0,Math.PI*2);
+        ctx.fillStyle = n.color;
+        ctx.fill();
+
+        n.x += n.speed * 0.5;
+        if(n.x > canvas.width + n.r) n.x = -n.r;
+    });
+}
+
+/* ------------ Player --------------- */
+class Player {
+    constructor() {
+        this.width = 40; this.height = 60;
+        this.x = canvas.width/2 - this.width/2;
+        this.y = canvas.height - 200;
+        this.vx = 0; this.vy = 0;
+        this.onGround = false;
+        this.legAngle = 0; this.squish = 1;
+        this.facing = 1;
+        this.attackTimer = 0;
+        this.invulnerableTimer = 0;
+        this.charging = false;
+        this.chargeProgress = 0;
+    }
+    jump(){ if(this.onGround){ this.vy=-14; this.onGround=false; spawnJumpParticles(this.x+this.width/2,this.y+this.height); } }
+    attack(){ this.attackTimer = 12; spawnAttackParticles(this.x + this.width/2, this.y+30); }
+    startCharge(){ 
+        if(chargedAttackAvailable && !this.charging){ 
+            this.charging = true; this.chargeProgress = 0; chargedAttackAvailable = false; spawnShockwave(this.x+this.width/2, this.y+25);
+        }
+    }
+    update(){
+        if(this.charging){
+            this.vx = 20*this.facing;
+            this.chargeProgress +=1;
+            if(this.chargeProgress>50){ this.charging=false; this.vx=0; }
+        } else {
+            if(keys.left){ this.vx -=0.6; this.facing=-1; }
+            if(keys.right){ this.vx +=0.6; this.facing=1; }
+        }
+        this.vx *= 0.85;
+        this.x += this.vx;
+        this.vy += gravity;
+        this.y += this.vy;
+
+        // Floor collision
+        this.onGround=false;
+        platforms.forEach(p=>{
+            if(this.x + this.width > p.x && this.x < p.x + p.w &&
+               this.y + this.height > p.y && this.y + this.height < p.y + p.h + 10){
+                   this.y = p.y - this.height;
+                   this.vy = 0;
+                   this.onGround = true;
+               }
+        });
+
+        if(this.x<0) this.x=0;
+        if(this.x+this.width>canvas.width) this.x=canvas.width-this.width;
+        if(this.onGround && Math.abs(this.vx)>0.3) this.legAngle +=0.25;
+        if(this.attackTimer>0) this.attackTimer--;
+        if(this.invulnerableTimer>0) this.invulnerableTimer--;
+    }
+    draw(){
+        ctx.save();
+        ctx.translate(this.x+this.width/2,this.y);
+        ctx.scale(this.facing,this.squish);
+        ctx.strokeStyle = this.invulnerableTimer>0 ? "yellow":"white";
+        ctx.lineWidth=4;
+
+        /* Stickman drawing */
+        ctx.beginPath(); ctx.arc(0,10,10,0,Math.PI*2); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0,20); ctx.lineTo(0,45); ctx.stroke();
+
+        // Arms + lightsaber
+        ctx.beginPath(); ctx.moveTo(0,25);
+
+        if(this.attackTimer>0 || this.charging){
+            let angle = Math.sin(this.attackTimer/2)*15;
+            ctx.lineTo(35,25-angle); ctx.stroke();
+
+            let bladeLength = this.charging?canvas.width:90;
+
+            // glowing blade core
+            ctx.strokeStyle=lightsaberColor;
+            ctx.lineWidth=6;
+            ctx.beginPath();
+            ctx.moveTo(35,25-angle);
+            ctx.lineTo(35+bladeLength*this.facing,25-angle);
+            ctx.stroke();
+
+            // glow aura
+            ctx.globalAlpha=0.6;
+            ctx.lineWidth=14;
+            ctx.stroke();
+            ctx.globalAlpha=1;
+
+        } else {
+            ctx.lineTo(-15,35); 
+            ctx.moveTo(0,25); ctx.lineTo(15,35); 
+            ctx.stroke();
+        }
+
+        // legs
+        ctx.beginPath();
+        if(this.onGround && Math.abs(this.vx)>0.3){
+            let l1=Math.sin(this.legAngle)*12;
+            let l2=Math.sin(this.legAngle+Math.PI)*12;
+            ctx.moveTo(0,45); ctx.lineTo(l1,60);
+            ctx.moveTo(0,45); ctx.lineTo(l2,60);
+        } else {
+            ctx.moveTo(0,45); ctx.lineTo(-10,55);
+            ctx.moveTo(0,45); ctx.lineTo(10,55);
+        }
+        ctx.stroke();
+
+        ctx.restore();
+    }
+}
+
+/* ------------ Enemy --------------- */
+class Enemy {
+    constructor(type, side){
+        this.width=40; this.height=60;
+        this.y = canvas.height-140;
+        this.alive=true;
+        this.type=type;
+        this.speed=(type==="fast"?4:2)+Math.random()*2;
+        this.jumpTimer=Math.floor(Math.random()*200)+100;
+        this.vy=0;
+        if(side==="left"){ this.x=-50; this.dir=1; } 
+        else { this.x=canvas.width+50; this.dir=-1; }
+    }
+    update(player){
+        if(!this.alive) return;
+
+        // Move toward player
+        let dir = (player.x + player.width/2) - (this.x + this.width/2);
+        this.x += Math.sign(dir) * this.speed;
+
+        // Jump sometimes
+        this.jumpTimer--;
+        if(this.jumpTimer<=0 && this.onGround()){
+            this.vy=-10-Math.random()*5;
+            this.jumpTimer = Math.floor(Math.random()*200)+100;
+        }
+
+        this.vy += gravity;
+        this.y += this.vy;
+
+        // Ground clamp
+        if(this.y + this.height >= canvas.height-80){
+            this.y = canvas.height-80-this.height; 
+            this.vy=0;
+        }
+
+        // Damage player
+        if(this.alive && player.invulnerableTimer===0){
+            if(this.x < player.x + player.width &&
+               this.x + this.width > player.x &&
+               this.y + this.height > player.y &&
+               this.y < player.y + player.height){
+
+                   playerHealth--;
+                   player.invulnerableTimer = 60;
+                   combo = 0;
+                   if(playerHealth <= 0) gameOver = true;
+            }
+        }
+    }
+    onGround(){ return this.y + this.height >= canvas.height-80; }
+    die(){
+        for(let i=0;i<25;i++){ 
+            particles.push(new Particle(this.x+this.width/2, this.y+this.height/2)); 
+        }
+        this.alive=false;
+    }
+    draw(){
+        if(!this.alive) return;
+        ctx.save();
+        ctx.translate(this.x+this.width/2,this.y);
+        ctx.strokeStyle=this.type==="fast"?"orange":"red"; 
+        ctx.lineWidth=4;
+
+        // Head
+        ctx.beginPath(); ctx.arc(0,10,10,0,Math.PI*2); ctx.stroke();
+
+        // Body
+        ctx.beginPath(); ctx.moveTo(0,20); ctx.lineTo(0,45); ctx.stroke();
+
+        // Arms
+        ctx.beginPath(); ctx.moveTo(0,25); ctx.lineTo(-15,35); ctx.moveTo(0,25); ctx.lineTo(15,35); ctx.stroke();
+
+        // Legs
+        ctx.beginPath(); ctx.moveTo(0,45); ctx.lineTo(-10,55); ctx.moveTo(0,45); ctx.lineTo(10,55); ctx.stroke();
+
+        ctx.restore();
+    }
+}
+
+/* ------------ Particles ------------ */
+class Particle{
+    constructor(x,y){
+        this.x=x; this.y=y;
+        this.vx=(Math.random()-0.5)*2;
+        this.vy=-Math.random()*3;
+        this.alpha=1;
+    } 
+    update(){ this.vy+=0.18; this.x+=this.vx; this.y+=this.vy; this.alpha-=0.04; } 
+    draw(){ ctx.globalAlpha=this.alpha; ctx.fillStyle="white"; ctx.fillRect(this.x,this.y,4,4); ctx.globalAlpha=1; } 
+}
+
+function spawnJumpParticles(x,y){ for(let i=0;i<10;i++) particles.push(new Particle(x,y)); }
+function spawnAttackParticles(x,y){ for(let i=0;i<8;i++) particles.push(new Particle(x+Math.random()*30-15, y+Math.random()*20-10)); }
+function spawnShockwave(x,y){ for(let i=0;i<15;i++) particles.push(new Particle(x,y)); }
+
+/* ------------ Stars ------------ */
+function initStars(){ 
+    for(let i=0;i<200;i++) 
+        stars.push({x:Math.random()*canvas.width, y:Math.random()*canvas.height, size:Math.random()*2, speed:Math.random()*0.5+0.2}); 
+}
+function drawStars(){ 
+    ctx.fillStyle="white"; 
+    stars.forEach(s=>{
+        s.y+=s.speed; if(s.y>canvas.height) s.y=0;
+        ctx.fillRect(s.x,s.y,s.size,s.size);
+    }); 
+}
+function spawnShootingStar(){ 
+    shootingStars.push({x:canvas.width, y:Math.random()*200, vx:-8-Math.random()*4, vy:2+Math.random()*2, life:0, maxLife:80+Math.random()*40}); 
+}
+function drawShootingStars(){ 
+    shootingStars.forEach(s=>{
+        ctx.beginPath();
+        ctx.moveTo(s.x,s.y);
+        ctx.lineTo(s.x+30,s.y-10);
+        ctx.strokeStyle="white"; ctx.lineWidth=2;
+        ctx.stroke();
+        s.x+=s.vx; s.y+=s.vy; s.life++;
+    });
+    shootingStars=shootingStars.filter(s=>s.life<s.maxLife);
+}
+
+/* ------------ Platforms & Ground --------------- */
+platforms.push({x:0,y:canvas.height-80,w:canvas.width,h:20});
+
+function drawGround(){
+    // Soft glowing ground
+    let g = ctx.createLinearGradient(0,canvas.height-200,0,canvas.height);
+    g.addColorStop(0,"rgba(0,50,0,0.4)");
+    g.addColorStop(1,"rgba(0,150,0,0.8)");
+    ctx.fillStyle = g;
+    ctx.fillRect(0,canvas.height-80,canvas.width,80);
+}
+
+/* ------------ Game Loop ------------ */
+let player;
+
+function startGame(color){
+    lightsaberColor = color;
+    player = new Player();
+    document.getElementById("menu").style.display="none";
+    gameStarted = true;
+
+    enemies = [];
+    particles = [];
+
+    setInterval(()=>{
+        let side = Math.random()<0.5?"left":"right";
+        let type = Math.random()<0.5?"fast":"tank";
+        enemies.push(new Enemy(type, side));
+    },1200);
+
+    initBackground();
+    initStars();
+    setInterval(spawnShootingStar,1500);
+    loop();
+}
+
+function loop(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    drawBackground();
+    drawStars();
+    drawShootingStars();
+    drawGround();
+
+    if(!gameStarted) return;
+
+    if(gameOver){ 
+        ctx.fillStyle="white"; 
+        ctx.font="50px Arial"; 
+        ctx.textAlign="center"; 
+        ctx.fillText("GAME OVER - Press R to Restart", canvas.width/2, canvas.height/2); 
+        requestAnimationFrame(loop); 
+        return; 
+    }
+
+    ctx.fillStyle="cyan"; 
+    ctx.font="60px Arial"; 
+    ctx.textAlign="center"; 
+    ctx.fillText("TIMING MASTER", canvas.width/2, 60);
+
+    // Instructions box
+    ctx.fillStyle="rgba(0,0,0,0.6)";
+    ctx.fillRect(20,20,300,120);
+    ctx.fillStyle="white";
+    ctx.font="16px Arial";
+    ctx.fillText("Controls:",30,45);
+    ctx.fillText("Arrow Left/Right - Move",30,65);
+    ctx.fillText("Space - Jump",30,85);
+    ctx.fillText("F - Attack",30,105);
+    ctx.fillText("R - Charged Attack (after 5 kills)",30,125);
+
+    player.update();
+    player.draw();
+
+    enemies.forEach(e=>{
+        if(e.alive && (player.attackTimer>0 || player.charging)){
+            let swordStartX = player.x + player.width/2;
+            let swordEndX = swordStartX + (player.charging?canvas.width*player.facing:90*player.facing);
+            let swordY = player.y + 25;
+
+            if(e.x + e.width > Math.min(swordStartX,swordEndX) &&
+               e.x < Math.max(swordStartX,swordEndX) &&
+               e.y + e.height > swordY-10 &&
+               e.y < swordY+10){ 
+
+                if(e.alive){
+                    e.die();
+                    score+=10*(combo+1);
+                    combo++;
+                    killCount++;
+
+                    if(killCount % 5 === 0)
+                        chargedAttackAvailable = true;
+                }
+            }
+        }
+
+        e.update(player);
+        e.draw();
+    });
+
+    for(let i=particles.length-1;i>=0;i--){
+        particles[i].update();
+        particles[i].draw();
+        if(particles[i].alpha<=0) particles.splice(i,1);
+    }
+
+    ctx.fillStyle="white"; ctx.font="24px Arial"; ctx.textAlign="left";
+    ctx.fillText("Score: "+score, 20,260);
+    ctx.fillText("Combo: x"+combo, 20,290);
+    ctx.fillText("Charged Ready: "+(chargedAttackAvailable?"YES":"NO"),20,320);
+
+    for(let i=0;i<3;i++){ 
+        ctx.fillStyle=i<playerHealth?"red":"gray"; 
+        ctx.fillRect(20+i*40,340,30,20); 
+    }
+
+    requestAnimationFrame(loop);
+}
+
+/* ------------ Controls ------------ */
+document.addEventListener("keydown", e=>{
+    if(e.code==="KeyR" && gameOver){
+        playerHealth=3; 
+        score=0; 
+        gameOver=false; 
+        combo=0; 
+        killCount=0; 
+        chargedAttackAvailable=false; 
+        player.x=canvas.width/2-20; 
+        player.y=canvas.height-200; 
+        enemies=[]; 
+        particles=[]; 
+        player.invulnerableTimer=0; 
+        player.attackTimer=0; 
+        player.charging=false; 
+        player.chargeProgress=0; 
+    }
+});
+
+document.addEventListener("keydown",e=>{
+    if(!gameStarted) return;
+    if(e.code==="Space") player.jump();
+    if(e.code==="ArrowLeft"||e.code==="KeyA") keys.left=true;
+    if(e.code==="ArrowRight"||e.code==="KeyD") keys.right=true;
+    if(e.code==="KeyF") player.attack();
+    if(e.code==="KeyR") player.startCharge();
+});
+document.addEventListener("keyup",e=>{
+    if(!gameStarted) return;
+    if(e.code==="ArrowLeft"||e.code==="KeyA") keys.left=false;
+    if(e.code==="ArrowRight"||e.code==="KeyD") keys.right=false;
+});
+</script>
+</body>
+</html>
